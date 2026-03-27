@@ -34,23 +34,55 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY-$TARGET.tar.gz"
+ARCHIVE="$BINARY-$TARGET.tar.gz"
+URL="https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE"
+CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums-sha256.txt"
 
 echo "Installing $BINARY $VERSION ($TARGET)..."
 
-# Download and extract
+# Download archive and checksums
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-curl -fsSL "$URL" -o "$TMPDIR/$BINARY.tar.gz"
-tar xzf "$TMPDIR/$BINARY.tar.gz" -C "$TMPDIR"
+curl -fsSL "$URL" -o "$TMPDIR/$ARCHIVE"
+curl -fsSL "$CHECKSUMS_URL" -o "$TMPDIR/checksums-sha256.txt"
+
+# Verify checksum
+cd "$TMPDIR"
+EXPECTED=$(grep "$ARCHIVE" checksums-sha256.txt | awk '{print $1}')
+if [ -z "$EXPECTED" ]; then
+  echo "warning: no checksum found for $ARCHIVE, skipping verification"
+else
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+  else
+    echo "warning: no sha256sum or shasum found, skipping verification"
+    ACTUAL="$EXPECTED"
+  fi
+
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "error: checksum verification failed!"
+    echo "  expected: $EXPECTED"
+    echo "  actual:   $ACTUAL"
+    echo ""
+    echo "The downloaded file may have been tampered with."
+    echo "Please report this at https://github.com/$REPO/issues"
+    exit 1
+  fi
+  echo "Checksum verified."
+fi
+
+# Extract
+tar xzf "$ARCHIVE"
 
 # Install
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$TMPDIR/$BINARY" "$INSTALL_DIR/$BINARY"
+  mv "$BINARY" "$INSTALL_DIR/$BINARY"
 else
   echo "Installing to $INSTALL_DIR (requires sudo)..."
-  sudo mv "$TMPDIR/$BINARY" "$INSTALL_DIR/$BINARY"
+  sudo mv "$BINARY" "$INSTALL_DIR/$BINARY"
 fi
 
 chmod +x "$INSTALL_DIR/$BINARY"

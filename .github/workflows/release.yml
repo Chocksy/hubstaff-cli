@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -76,6 +78,18 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum hubstaff-cli-*.tar.gz hubstaff-cli-*.zip > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Generate GitHub artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            hubstaff-cli-*.tar.gz
+            hubstaff-cli-*.zip
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -83,3 +97,4 @@ jobs:
           files: |
             hubstaff-cli-*.tar.gz
             hubstaff-cli-*.zip
+            checksums-sha256.txt
