@@ -27,29 +27,38 @@ Or download binaries directly from [Releases](https://github.com/chocksy/hubstaf
 
 ## Authentication
 
+### Personal Access Token (recommended for agents)
+
+Get a token from [developer.hubstaff.com](https://developer.hubstaff.com) > Personal access tokens, then:
+
+```bash
+hubstaff-cli config set-pat YOUR_PERSONAL_TOKEN
+```
+
+This exchanges the token automatically and saves credentials that auto-refresh.
+
 ### OAuth Browser Flow (interactive)
 
 ```bash
 hubstaff-cli login
 ```
 
-Opens your browser to authenticate with Hubstaff. Tokens are saved automatically.
+Opens your browser to authenticate with Hubstaff. Tokens are saved and auto-refresh.
 
-### API Token (agents/automation)
-
-```bash
-export HUBSTAFF_API_TOKEN="your-oauth-token"
-```
-
-Or persist it:
+### Environment Variable (CI/automation)
 
 ```bash
-hubstaff-cli config set token "your-oauth-token"
+export HUBSTAFF_API_TOKEN="your-access-token"
 ```
+
+The env var takes priority over saved tokens.
 
 ## Quick Start
 
 ```bash
+# Authenticate
+hubstaff-cli config set-pat YOUR_PERSONAL_TOKEN
+
 # Set a default organization
 hubstaff-cli config set org 12345
 
@@ -62,7 +71,7 @@ hubstaff-cli orgs list
 # List projects
 hubstaff-cli projects list
 
-# List members
+# List members with names and emails
 hubstaff-cli members list
 
 # Invite someone
@@ -71,85 +80,186 @@ hubstaff-cli invites create --email new@hire.com --role project_user
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `users me` | Show authenticated user |
-| `users show <id>` | Show user by ID |
-| `orgs list` | List organizations |
-| `orgs show <id>` | Show organization |
-| `projects list` | List projects (requires `--org`) |
-| `projects show <id>` | Show project |
-| `projects create --name N` | Create project |
-| `members list` | List org members (or `--project P` for project members) |
-| `members create --email E --first-name F --last-name L` | Create member |
-| `members remove --user-id U` | Remove member |
-| `invites list` | List invites |
-| `invites show <id>` | Show invite |
-| `invites create --email E` | Send invite |
-| `invites delete <id>` | Delete invite |
-| `tasks list --project P` | List tasks |
-| `tasks show <id>` | Show task |
-| `tasks create --project P --summary S` | Create task |
-| `activities list --start DATE` | List activities |
-| `daily-activities list --start DATE` | List daily summaries |
-| `teams list` | List teams |
-| `teams show <id>` | Show team |
-| `notes list --start DATE` | List notes |
-| `notes create --project P --description D --recorded-time T` | Create note |
-| `time-entries create --project P --start T --stop T` | Create time entry |
-| `config set KEY VALUE` | Set config value |
-| `config show` | Show config |
-| `login` | OAuth browser login |
-| `logout` | Clear tokens |
+### Users
+
+```bash
+hubstaff-cli users me                  # Show authenticated user
+hubstaff-cli users show <id>           # Show user by ID
+```
+
+### Organizations
+
+```bash
+hubstaff-cli orgs list                 # List organizations
+hubstaff-cli orgs show <id>            # Show organization details
+```
+
+### Projects
+
+```bash
+hubstaff-cli projects list             # List projects (requires --org)
+hubstaff-cli projects show <id>        # Show project details
+hubstaff-cli projects create --name N  # Create project (requires --org)
+```
+
+### Members
+
+```bash
+hubstaff-cli members list                     # List org members (requires --org)
+hubstaff-cli members list --project <id>      # List project members
+hubstaff-cli members list --search-email E    # Filter by email
+hubstaff-cli members list --search-name N     # Filter by name
+hubstaff-cli members list --include-removed   # Include removed members
+
+hubstaff-cli members create \                 # Create member (requires --org)
+  --email user@co.com \
+  --first-name Jane \
+  --last-name Smith \
+  --role project_user \                       # organization_manager, project_manager, project_user, project_viewer
+  --project-ids 1,2,3 \                      # Comma-separated project IDs
+  --team-ids 4,5                              # Comma-separated team IDs
+  # Password: --password P, --password-stdin, or auto-generated
+
+hubstaff-cli members remove --user-id <id>    # Remove member (requires --org)
+```
+
+### Invites
+
+```bash
+hubstaff-cli invites list                     # List invites (requires --org)
+hubstaff-cli invites list --status pending    # Filter: all, pending, accepted, expired
+hubstaff-cli invites show <id>                # Show invite details
+
+hubstaff-cli invites create \                 # Send invite (requires --org)
+  --email user@co.com \
+  --role project_user \                       # organization_manager, project_manager, project_user, project_viewer
+  --project-ids 1,2,3                         # Comma-separated project IDs
+
+hubstaff-cli invites delete <id>              # Delete pending/expired invite
+```
+
+### Tasks
+
+```bash
+hubstaff-cli tasks list --project <id>        # List tasks for a project
+
+hubstaff-cli tasks show <id>                  # Show task details
+
+hubstaff-cli tasks create \                   # Create task
+  --project <id> \
+  --summary "Fix the login bug" \
+  --assignee-id <user_id>                     # Optional assignee
+```
+
+### Activities
+
+```bash
+hubstaff-cli activities list \                # List activities (requires --org)
+  --start 2026-03-20 \                        # ISO 8601 date or datetime (required)
+  --stop 2026-03-27                           # Defaults to now if omitted
+```
+
+### Daily Activities
+
+```bash
+hubstaff-cli daily-activities list \          # List daily summaries (requires --org)
+  --start 2026-03-01 \                        # Date YYYY-MM-DD (required)
+  --stop 2026-03-31                           # Defaults to today if omitted
+```
+
+### Teams
+
+```bash
+hubstaff-cli teams list                       # List teams (requires --org)
+hubstaff-cli teams show <id>                  # Show team details
+```
+
+### Notes
+
+```bash
+hubstaff-cli notes list \                     # List notes (requires --org)
+  --start 2026-03-20 \                        # ISO 8601 date or datetime (required)
+  --stop 2026-03-27                           # Defaults to now if omitted
+
+hubstaff-cli notes create \                   # Create note
+  --project <id> \
+  --description "Finished the migration" \
+  --recorded-time 2026-03-27
+```
+
+### Time Entries
+
+```bash
+hubstaff-cli time-entries create \            # Create manual time entry
+  --project <id> \
+  --start 2026-03-27T09:00:00Z \
+  --stop 2026-03-27T17:00:00Z
+```
+
+### Configuration
+
+```bash
+hubstaff-cli config set org 12345             # Set default organization
+hubstaff-cli config set api_url URL           # Set API URL (e.g., staging)
+hubstaff-cli config set auth_url URL          # Set auth URL (e.g., staging)
+hubstaff-cli config set token TOKEN           # Set access token directly
+hubstaff-cli config set format compact        # Set output format: compact or json
+hubstaff-cli config set-pat TOKEN             # Exchange personal access token
+hubstaff-cli config show                      # Show current configuration
+hubstaff-cli login                            # OAuth browser login
+hubstaff-cli logout                           # Clear saved tokens
+```
 
 ## Global Flags
+
+All commands support these flags:
 
 ```
 --org <id>          Override default organization
 --json              Full JSON output (default: compact)
---page-start <id>   Pagination cursor
+--page-start <id>   Pagination cursor (record ID)
 --page-limit <n>    Results per page (default: 100, max: 500)
 ```
 
 ## Output Formats
 
-**Compact (default)** -- token-efficient for agents:
+**Compact (default)** — token-efficient for agents:
 
 ```
-ID      NAME            EMAIL               ROLE              STATUS
-884421  Jane Smith      jane@acme.co        owner             active
-884422  Bob Jones       bob@acme.co         project_manager   active
-2 members | org:123
+USER_ID  NAME            EMAIL               ROLE   STATUS
+130      Anatolie Stafie anatolie@co.com     owner  active
+133      Ciocanel Razvan razvan@co.com       owner  active
+2 members | org:84
 ```
 
-**JSON (`--json`)** -- full API response:
+**JSON (`--json`)** — full API response:
 
 ```json
-{"members": [{"id": 884421, ...}], "pagination": {"next_page_start_id": 884423}}
+{"members": [{"user_id": 130, ...}], "users": [...], "pagination": {...}}
 ```
 
-## Configuration
-
-Config file: `~/.config/hubstaff-cli/config.toml` (or `$XDG_CONFIG_HOME/hubstaff-cli/config.toml`)
+## Staging / Custom Environments
 
 ```bash
-hubstaff-cli config set org 12345
-hubstaff-cli config set api_url https://staging.api.hubstaff.com/v2
-hubstaff-cli config show
+hubstaff-cli config set api_url https://api.staging.hbstf.co/v2
+hubstaff-cli config set auth_url https://account.staging.hbstf.co
 ```
 
 ## Agent Usage
 
-Agents get the best experience with an env var token and compact output:
+Agents work best with a personal access token and compact output:
 
 ```bash
-export HUBSTAFF_API_TOKEN="..."
+# One-time setup
+hubstaff-cli config set-pat YOUR_PERSONAL_TOKEN
 hubstaff-cli config set org 12345
 
-# Now agents can run commands with minimal tokens
+# Agents can now run commands with minimal tokens
+hubstaff-cli users me
 hubstaff-cli members list
 hubstaff-cli projects list
 hubstaff-cli activities list --start 2026-03-20
+hubstaff-cli members list --search-email john@company.com
 ```
 
 ## License
