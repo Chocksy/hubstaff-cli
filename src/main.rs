@@ -108,6 +108,8 @@ enum ConfigAction {
         /// Your personal access token from developer.hubstaff.com
         token: String,
     },
+    /// Set up OAuth app credentials for browser login
+    SetupOauth,
     /// Show current configuration
     Show,
 }
@@ -313,7 +315,10 @@ enum TimeEntriesAction {
 }
 
 fn main() {
-    // Load .env file if present (silently ignore if missing)
+    // Load .env from config dir first (setup-oauth writes here),
+    // then local .env (overrides if present)
+    let config_env = config::Config::config_dir().join(".env");
+    let _ = dotenvy::from_path(&config_env);
     let _ = dotenvy::dotenv();
 
     let cli = Cli::parse();
@@ -329,6 +334,7 @@ fn run(cli: &Cli) -> Result<(), error::CliError> {
         Commands::Config { action } => match action {
             ConfigAction::Set { key, value } => commands::config_cmd::set(key, value),
             ConfigAction::SetPat { token } => commands::config_cmd::set_pat(token),
+            ConfigAction::SetupOauth => commands::config_cmd::setup_oauth(),
             ConfigAction::Show => commands::config_cmd::show(),
         },
         Commands::Login => commands::login::login(),

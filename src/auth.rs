@@ -11,13 +11,34 @@ const PORT_END: u16 = 19886;
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
 
 fn client_id() -> Result<String, CliError> {
-    std::env::var("HUBSTAFF_CLIENT_ID")
-        .map_err(|_| CliError::Config("HUBSTAFF_CLIENT_ID not set. Add it to .env or export it.".into()))
+    std::env::var("HUBSTAFF_CLIENT_ID").map_err(|_| {
+        CliError::Config(
+            "HUBSTAFF_CLIENT_ID not set.\n\
+             \n\
+             OAuth login requires a Hubstaff OAuth app. To set up:\n\
+             1. Go to https://developer.hubstaff.com > OAuth Apps > Create\n\
+             2. Set redirect URI to http://localhost:19876/callback\n\
+             3. Copy the Client ID and Client Secret\n\
+             4. Run:  hubstaff-cli config setup-oauth\n\
+             \n\
+             Or set HUBSTAFF_CLIENT_ID and HUBSTAFF_CLIENT_SECRET env vars.\n\
+             \n\
+             Alternative: skip OAuth and use a personal access token:\n\
+               hubstaff-cli config set-pat YOUR_TOKEN"
+                .into(),
+        )
+    })
 }
 
 fn client_secret() -> Result<String, CliError> {
-    std::env::var("HUBSTAFF_CLIENT_SECRET")
-        .map_err(|_| CliError::Config("HUBSTAFF_CLIENT_SECRET not set. Add it to .env or export it.".into()))
+    std::env::var("HUBSTAFF_CLIENT_SECRET").map_err(|_| {
+        CliError::Config(
+            "HUBSTAFF_CLIENT_SECRET not set.\n\
+             Run: hubstaff-cli config setup-oauth\n\
+             Or set the HUBSTAFF_CLIENT_SECRET env var."
+                .into(),
+        )
+    })
 }
 
 pub fn login() -> Result<(), CliError> {

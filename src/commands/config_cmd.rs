@@ -89,6 +89,67 @@ pub fn set_pat(pat: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Interactive setup for OAuth app credentials. Writes to .env in the current directory.
+pub fn setup_oauth() -> Result<(), CliError> {
+    use std::io::{self, Write};
+
+    println!("Hubstaff OAuth App Setup");
+    println!("========================");
+    println!();
+    println!("1. Go to https://developer.hubstaff.com");
+    println!("2. Navigate to OAuth Apps > Create an app");
+    println!("3. Set redirect URI to: http://localhost:19876/callback");
+    println!("4. Copy the Client ID and Client Secret below.");
+    println!();
+
+    print!("Client ID: ");
+    io::stdout().flush().unwrap();
+    let mut client_id = String::new();
+    io::stdin()
+        .read_line(&mut client_id)
+        .map_err(|e| CliError::Config(format!("failed to read input: {e}")))?;
+    let client_id = client_id.trim();
+
+    if client_id.is_empty() {
+        return Err(CliError::Config("client ID cannot be empty".into()));
+    }
+
+    print!("Client Secret: ");
+    io::stdout().flush().unwrap();
+    let mut client_secret = String::new();
+    io::stdin()
+        .read_line(&mut client_secret)
+        .map_err(|e| CliError::Config(format!("failed to read input: {e}")))?;
+    let client_secret = client_secret.trim();
+
+    if client_secret.is_empty() {
+        return Err(CliError::Config("client secret cannot be empty".into()));
+    }
+
+    // Write to config dir .env file so it works from any directory
+    let env_path = Config::config_dir().join(".env");
+    let dir = Config::config_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    std::fs::write(
+        &env_path,
+        format!("HUBSTAFF_CLIENT_ID={client_id}\nHUBSTAFF_CLIENT_SECRET={client_secret}\n"),
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    println!();
+    println!("Saved to {}", env_path.display());
+    println!();
+    println!("You can now run: hubstaff-cli login");
+    Ok(())
+}
+
 pub fn show() -> Result<(), CliError> {
     let config = Config::load()?;
     println!("api_url = {}", config.api_url);

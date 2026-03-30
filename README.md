@@ -35,15 +35,36 @@ Get a token from [developer.hubstaff.com](https://developer.hubstaff.com) > Pers
 hubstaff-cli config set-pat YOUR_PERSONAL_TOKEN
 ```
 
-This exchanges the token automatically and saves credentials that auto-refresh.
+This exchanges the token automatically and saves credentials that auto-refresh. No OAuth app needed.
 
 ### OAuth Browser Flow (interactive)
+
+OAuth login requires a Hubstaff OAuth app (one-time setup):
+
+```bash
+hubstaff-cli config setup-oauth
+```
+
+This will prompt you for a Client ID and Client Secret. To get those:
+
+1. Go to [developer.hubstaff.com](https://developer.hubstaff.com) > OAuth Apps > Create
+2. Set the redirect URI to `http://localhost:19876/callback`
+3. Copy the Client ID and Client Secret
+
+Then authenticate:
 
 ```bash
 hubstaff-cli login
 ```
 
 Opens your browser to authenticate with Hubstaff. Tokens are saved and auto-refresh.
+
+Alternatively, set the credentials via environment variables or a `.env` file:
+
+```bash
+export HUBSTAFF_CLIENT_ID="your_client_id"
+export HUBSTAFF_CLIENT_SECRET="your_client_secret"
+```
 
 ### Environment Variable (CI/automation)
 
@@ -205,8 +226,9 @@ hubstaff-cli config set auth_url URL          # Set auth URL (e.g., staging)
 hubstaff-cli config set token TOKEN           # Set access token directly
 hubstaff-cli config set format compact        # Set output format: compact or json
 hubstaff-cli config set-pat TOKEN             # Exchange personal access token
+hubstaff-cli config setup-oauth               # Set up OAuth app credentials
 hubstaff-cli config show                      # Show current configuration
-hubstaff-cli login                            # OAuth browser login
+hubstaff-cli login                            # OAuth browser login (requires setup-oauth)
 hubstaff-cli logout                           # Clear saved tokens
 ```
 
