@@ -233,3 +233,40 @@ fn merge_users(data: &mut serde_json::Value) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthConfig, Config};
+
+    fn test_client(server_url: &str) -> HubstaffClient {
+        let config = Config {
+            api_url: server_url.to_string(),
+            auth: AuthConfig {
+                access_token: Some("test_token".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        HubstaffClient::new(config).expect("client should be constructed")
+    }
+
+    #[test]
+    fn remove_uses_org_path_and_user_id_body() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("PUT", "/organizations/42/update_members")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::Regex(r#""user_id"\s*:\s*88"#.into()),
+                mockito::Matcher::Regex(r#""role"\s*:\s*"remove""#.into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"ok":true}"#)
+            .create();
+
+        let mut client = test_client(&server.url());
+        remove(&mut client, 42, 88, true).expect("remove should succeed");
+
+        mock.assert();
+    }
+}

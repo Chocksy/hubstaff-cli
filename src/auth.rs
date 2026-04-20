@@ -4,11 +4,17 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use url::Url;
 
 const PORT_START: u16 = 19876;
 const PORT_END: u16 = 19886;
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
+const AUTH_HTTP_TIMEOUT_SECS: u64 = 10;
+const REFRESH_NETWORK_ERROR: &str =
+    "Couldn't refresh your session right now. Check your internet connection and try again.";
+const REFRESH_AUTH_ERROR: &str =
+    "Couldn't refresh your session. Please run 'hubstaff login' again.";
 
 fn client_id() -> Result<String, CliError> {
     std::env::var("HUBSTAFF_CLIENT_ID").map_err(|_| {
@@ -86,9 +92,17 @@ pub fn logout() -> Result<(), CliError> {
 }
 
 pub fn refresh_token(config: &mut Config) -> Result<(), CliError> {
-    let auth_base = config.auth_url.clone();
     let id = client_id()?;
     let secret = client_secret()?;
+    refresh_token_with_credentials(config, &id, &secret)
+}
+
+fn refresh_token_with_credentials(
+    config: &mut Config,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<(), CliError> {
+    let auth_base = config.auth_url.clone();
     let refresh = config
         .auth
         .refresh_token
@@ -96,31 +110,32 @@ pub fn refresh_token(config: &mut Config) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Auth("session expired. Run 'hubstaff login'".to_string()))?
         .clone();
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(AUTH_HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|_| CliError::Network(REFRESH_NETWORK_ERROR.to_string()))?;
     let resp = client
         .post(format!("{auth_base}/access_tokens"))
-        .basic_auth(&id, Some(&secret))
+        .basic_auth(client_id, Some(client_secret))
         .form(&[("grant_type", "refresh_token"), ("refresh_token", &refresh)])
         .send()
-        .map_err(|e| CliError::Network(format!("token refresh failed: {e}")))?;
+        .map_err(|_| CliError::Network(REFRESH_NETWORK_ERROR.to_string()))?;
 
     if !resp.status().is_success() {
-        return Err(CliError::Auth(
-            "session expired. Run 'hubstaff login'".to_string(),
-        ));
+        return Err(CliError::Auth(REFRESH_AUTH_ERROR.to_string()));
     }
 
     let body: serde_json::Value = resp
         .json()
-        .map_err(|e| CliError::Auth(format!("failed to parse refresh response: {e}")))?;
+        .map_err(|_| CliError::Auth(REFRESH_AUTH_ERROR.to_string()))?;
 
     let new_access = body["access_token"]
         .as_str()
-        .ok_or_else(|| CliError::Auth("missing access_token in refresh response".to_string()))?
+        .ok_or_else(|| CliError::Auth(REFRESH_AUTH_ERROR.to_string()))?
         .to_string();
     let new_refresh = body["refresh_token"]
         .as_str()
-        .ok_or_else(|| CliError::Auth("missing refresh_token in refresh response".to_string()))?
+        .ok_or_else(|| CliError::Auth(REFRESH_AUTH_ERROR.to_string()))?
         .to_string();
 
     config.auth.access_token = Some(new_access);
@@ -344,6 +359,19 @@ pub fn generate_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AuthConfig, Config};
+
+    fn refresh_test_config(auth_url: String) -> Config {
+        Config {
+            auth_url,
+            auth: AuthConfig {
+                access_token: Some("old_access".to_string()),
+                refresh_token: Some("old_refresh".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn pkce_verifier_and_challenge_are_different() {
@@ -463,5 +491,66 @@ mod tests {
         assert!(result.is_ok());
         let (_, port) = result.unwrap();
         assert!((PORT_START..=PORT_END).contains(&port));
+    }
+
+    #[test]
+    fn refresh_token_returns_human_network_error_on_connect_failure() {
+        let mut config = refresh_test_config("http://127.0.0.1:9".to_string());
+        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        match err {
+            CliError::Network(msg) => assert_eq!(msg, REFRESH_NETWORK_ERROR),
+            _ => panic!("expected network error"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_returns_human_auth_error_on_non_success_status() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/access_tokens")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid_grant"}"#)
+            .create();
+
+        let mut config = refresh_test_config(server.url());
+        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        match err {
+            CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
+            _ => panic!("expected auth error"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_returns_human_auth_error_on_invalid_json() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/access_tokens")
+            .with_status(200)
+            .with_body("not json")
+            .create();
+
+        let mut config = refresh_test_config(server.url());
+        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        match err {
+            CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
+            _ => panic!("expected auth error"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_returns_human_auth_error_on_missing_tokens() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/access_tokens")
+            .with_status(200)
+            .with_body(r#"{"access_token":"new_access"}"#)
+            .create();
+
+        let mut config = refresh_test_config(server.url());
+        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        match err {
+            CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
+            _ => panic!("expected auth error"),
+        }
     }
 }

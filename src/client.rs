@@ -6,6 +6,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
+const REFRESH_SKEW_SECS: i64 = 120;
+
 pub struct HubstaffClient {
     config: Config,
     http: Client,
@@ -67,6 +69,30 @@ impl HubstaffClient {
         &self.config.api_url
     }
 
+    fn should_refresh_proactively(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if self.env_api_token.is_some() || self.config.auth.refresh_token.is_none() {
+            return false;
+        }
+
+        let Some(expires_at) = self.config.auth.expires_at.as_deref() else {
+            return false;
+        };
+
+        let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+            return false;
+        };
+        let expires_at = expires_at.with_timezone(&chrono::Utc);
+        let refresh_deadline = now + chrono::Duration::seconds(REFRESH_SKEW_SECS);
+        expires_at <= refresh_deadline
+    }
+
+    fn ensure_fresh_token(&mut self) -> Result<(), CliError> {
+        if self.should_refresh_proactively(chrono::Utc::now()) {
+            auth::refresh_token(&mut self.config)?;
+        }
+        Ok(())
+    }
+
     pub fn get(&mut self, path: &str, params: &HashMap<String, String>) -> Result<Value, CliError> {
         self.request(Method::Get, path, params, &Value::Null)
     }
@@ -107,6 +133,8 @@ impl HubstaffClient {
         params: &HashMap<String, String>,
         body: &Value,
     ) -> Result<Value, CliError> {
+        self.ensure_fresh_token()?;
+
         let url = format!("{}{path}", self.base_url());
         let token = self.token()?;
 
@@ -324,7 +352,7 @@ mod tests {
     #[test]
     fn api_error_400() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/bad")
             .with_status(400)
             .with_body(r#"{"code":"invalid_params","error":"bad request"}"#)
@@ -351,7 +379,7 @@ mod tests {
     #[test]
     fn api_error_404() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/missing")
             .with_status(404)
             .with_body(r#"{"code":"not_found","error":"resource not found"}"#)
@@ -367,7 +395,7 @@ mod tests {
     #[test]
     fn rate_limited_429() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/limited")
             .with_status(429)
             .with_header("retry-after", "30")
@@ -395,7 +423,7 @@ mod tests {
     #[test]
     fn rate_limited_429_no_header() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/limited")
             .with_status(429)
             .with_body("")
@@ -414,7 +442,7 @@ mod tests {
     #[test]
     fn non_json_error_response() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/html-error")
             .with_status(502)
             .with_body("<html><body>Bad Gateway</body></html>")
@@ -450,7 +478,7 @@ mod tests {
     #[test]
     fn auth_401_with_env_var_token() {
         let mut server = mockito::Server::new();
-        server
+        let _mock = server
             .mock("GET", "/protected")
             .with_status(401)
             .with_body(r#"{"error":"invalid_token"}"#)
@@ -496,5 +524,94 @@ mod tests {
         client.get("/test", &HashMap::new()).unwrap();
 
         mock.assert();
+    }
+
+    #[test]
+    fn proactive_refresh_false_with_env_token() {
+        let config = Config {
+            auth: crate::config::AuthConfig {
+                access_token: Some("test_token".to_string()),
+                refresh_token: Some("refresh_token".to_string()),
+                expires_at: Some(chrono::Utc::now().to_rfc3339()),
+            },
+            ..Default::default()
+        };
+        let client =
+            HubstaffClient::new_with_env_token(config, Some("env_api_token".to_string())).unwrap();
+
+        assert!(!client.should_refresh_proactively(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn proactive_refresh_false_when_expiry_far_in_future() {
+        let config = Config {
+            auth: crate::config::AuthConfig {
+                access_token: Some("test_token".to_string()),
+                refresh_token: Some("refresh_token".to_string()),
+                expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc3339()),
+            },
+            ..Default::default()
+        };
+        let client = test_client(config);
+
+        assert!(!client.should_refresh_proactively(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn proactive_refresh_true_when_expiry_within_skew() {
+        let now = chrono::Utc::now();
+        let config = Config {
+            auth: crate::config::AuthConfig {
+                access_token: Some("test_token".to_string()),
+                refresh_token: Some("refresh_token".to_string()),
+                expires_at: Some((now + chrono::Duration::seconds(30)).to_rfc3339()),
+            },
+            ..Default::default()
+        };
+        let client = test_client(config);
+
+        assert!(client.should_refresh_proactively(now));
+    }
+
+    #[test]
+    fn request_continues_when_expires_at_is_invalid() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/users/me")
+            .match_header("authorization", "Bearer test_token")
+            .with_status(200)
+            .with_body(r#"{"user":{"id":1}}"#)
+            .create();
+
+        let mut config = test_config(&server.url());
+        config.auth.refresh_token = Some("refresh_token".to_string());
+        config.auth.expires_at = Some("not-a-timestamp".to_string());
+        let mut client = test_client(config);
+        let result = client.get("/users/me", &HashMap::new()).unwrap();
+
+        assert_eq!(result["user"]["id"], 1);
+        mock.assert();
+    }
+
+    #[test]
+    fn request_fails_when_proactive_refresh_fails() {
+        let mut config = test_config("http://127.0.0.1:9");
+        config.auth.refresh_token = Some("refresh_token".to_string());
+        config.auth.expires_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339());
+        // Force refresh attempt to fail regardless of env by using an unreachable auth endpoint.
+        config.auth_url = "http://127.0.0.1:9".to_string();
+
+        let mut client = test_client(config);
+        let err = client.get("/users/me", &HashMap::new()).unwrap_err();
+        match err {
+            CliError::Network(message) => {
+                assert!(message.contains("Couldn't refresh your session right now"));
+            }
+            CliError::Config(message) => {
+                assert!(message.contains("HUBSTAFF_CLIENT_ID not set"));
+            }
+            _ => panic!("expected proactive refresh error"),
+        }
     }
 }
