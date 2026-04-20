@@ -101,3 +101,58 @@ pub fn create(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthConfig, Config};
+
+    fn test_client(server_url: &str) -> HubstaffClient {
+        let config = Config {
+            api_url: server_url.to_string(),
+            auth: AuthConfig {
+                access_token: Some("test_token".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        HubstaffClient::new(config).expect("client should be constructed")
+    }
+
+    #[test]
+    fn list_includes_pagination_params() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/projects/9/tasks")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("page_start_id".into(), "11".into()),
+                mockito::Matcher::UrlEncoded("page_limit".into(), "25".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"tasks":[]}"#)
+            .create();
+
+        let mut client = test_client(&server.url());
+        list(&mut client, 9, true, Some(11), Some(25)).expect("list should succeed");
+
+        mock.assert();
+    }
+
+    #[test]
+    fn create_uses_project_id_in_path() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/projects/77/tasks")
+            .match_body(mockito::Matcher::Regex(
+                r#""summary"\s*:\s*"Write tests""#.into(),
+            ))
+            .with_status(201)
+            .with_body(r#"{"task":{"id":1,"summary":"Write tests"}}"#)
+            .create();
+
+        let mut client = test_client(&server.url());
+        create(&mut client, 77, "Write tests", None, true).expect("create should succeed");
+
+        mock.assert();
+    }
+}

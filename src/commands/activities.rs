@@ -58,3 +58,55 @@ fn normalize_timestamp(input: &str) -> String {
         format!("{input}T00:00:00Z")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthConfig, Config};
+
+    fn test_client(server_url: &str) -> HubstaffClient {
+        let config = Config {
+            api_url: server_url.to_string(),
+            auth: AuthConfig {
+                access_token: Some("test_token".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        HubstaffClient::new(config).expect("client should be constructed")
+    }
+
+    #[test]
+    fn list_normalizes_date_inputs_to_midnight_utc() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/organizations/5/activities")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "time_slot[start]".into(),
+                    "2026-03-01T00:00:00Z".into(),
+                ),
+                mockito::Matcher::UrlEncoded(
+                    "time_slot[stop]".into(),
+                    "2026-03-02T00:00:00Z".into(),
+                ),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"activities":[]}"#)
+            .create();
+
+        let mut client = test_client(&server.url());
+        list(
+            &mut client,
+            5,
+            "2026-03-01",
+            Some("2026-03-02"),
+            true,
+            None,
+            None,
+        )
+        .expect("list should succeed");
+
+        mock.assert();
+    }
+}
