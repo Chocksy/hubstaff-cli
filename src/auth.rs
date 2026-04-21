@@ -16,10 +16,22 @@ const REFRESH_NETWORK_ERROR: &str =
 const REFRESH_AUTH_ERROR: &str =
     "Couldn't refresh your session. Please run 'hubstaff login' again.";
 
-fn client_id() -> Result<String, CliError> {
-    std::env::var("HUBSTAFF_CLIENT_ID").map_err(|_| {
+fn first_non_blank(
+    primary: Option<String>,
+    fallback: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    primary
+        .filter(|s| !s.is_empty())
+        .or_else(|| fallback().filter(|s| !s.is_empty()))
+}
+
+fn client_id(config: &Config) -> Result<String, CliError> {
+    first_non_blank(config.oauth.client_id.clone(), || {
+        std::env::var("HUBSTAFF_CLIENT_ID").ok()
+    })
+    .ok_or_else(|| {
         CliError::Config(
-            "HUBSTAFF_CLIENT_ID not set.\n\
+            "OAuth client ID not set.\n\
              \n\
              OAuth login requires a Hubstaff OAuth app. To set up:\n\
              1. Go to https://developer.hubstaff.com > OAuth Apps > Create\n\
@@ -36,10 +48,13 @@ fn client_id() -> Result<String, CliError> {
     })
 }
 
-fn client_secret() -> Result<String, CliError> {
-    std::env::var("HUBSTAFF_CLIENT_SECRET").map_err(|_| {
+fn client_secret(config: &Config) -> Result<String, CliError> {
+    first_non_blank(config.oauth.client_secret.clone(), || {
+        std::env::var("HUBSTAFF_CLIENT_SECRET").ok()
+    })
+    .ok_or_else(|| {
         CliError::Config(
-            "HUBSTAFF_CLIENT_SECRET not set.\n\
+            "OAuth client secret not set.\n\
              Run: hubstaff config setup-oauth\n\
              Or set the HUBSTAFF_CLIENT_SECRET env var."
                 .into(),
@@ -51,8 +66,8 @@ pub fn login() -> Result<(), CliError> {
     let config = Config::load()?;
     let auth_base = &config.auth_url;
 
-    let id = client_id()?;
-    let secret = client_secret()?;
+    let id = client_id(&config)?;
+    let secret = client_secret(&config)?;
 
     let (verifier, challenge) = generate_pkce();
     let state = generate_state();
@@ -90,16 +105,16 @@ pub fn logout() -> Result<(), CliError> {
 }
 
 pub fn refresh_token(config: &mut Config) -> Result<(), CliError> {
-    let id = client_id()?;
-    let secret = client_secret()?;
-    refresh_token_with_credentials(config, &id, &secret)
+    if config.has_oauth_app() {
+        let id = client_id(config)?;
+        let secret = client_secret(config)?;
+        do_refresh(config, Some((&id, &secret)))
+    } else {
+        do_refresh(config, None)
+    }
 }
 
-fn refresh_token_with_credentials(
-    config: &mut Config,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<(), CliError> {
+fn do_refresh(config: &mut Config, basic_auth: Option<(&str, &str)>) -> Result<(), CliError> {
     let auth_base = config.auth_url.clone();
     let refresh = config
         .auth
@@ -112,10 +127,13 @@ fn refresh_token_with_credentials(
         .timeout(Duration::from_secs(AUTH_HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|_| CliError::Network(REFRESH_NETWORK_ERROR.to_string()))?;
-    let resp = client
+    let mut req = client
         .post(format!("{auth_base}/access_tokens"))
-        .basic_auth(client_id, Some(client_secret))
-        .form(&[("grant_type", "refresh_token"), ("refresh_token", &refresh)])
+        .form(&[("grant_type", "refresh_token"), ("refresh_token", &refresh)]);
+    if let Some((id, secret)) = basic_auth {
+        req = req.basic_auth(id, Some(secret));
+    }
+    let resp = req
         .send()
         .map_err(|_| CliError::Network(REFRESH_NETWORK_ERROR.to_string()))?;
 
@@ -138,7 +156,7 @@ fn refresh_token_with_credentials(
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: String,
-    pub expires_at: Option<String>,
+    pub expires_at: Option<u64>,
 }
 
 impl TokenSet {
@@ -152,8 +170,8 @@ impl TokenSet {
             .ok_or_else(|| CliError::Auth("missing refresh_token in response".into()))?
             .to_string();
         let expires_at = body["expires_in"]
-            .as_i64()
-            .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339());
+            .as_u64()
+            .map(|secs| crate::time::now_secs().saturating_add(secs));
         Ok(Self {
             access_token,
             refresh_token,
@@ -489,7 +507,7 @@ mod tests {
     #[test]
     fn refresh_token_returns_human_network_error_on_connect_failure() {
         let mut config = refresh_test_config("http://127.0.0.1:9".to_string());
-        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        let err = do_refresh(&mut config, Some(("id", "secret"))).unwrap_err();
         match err {
             CliError::Network(msg) => assert_eq!(msg, REFRESH_NETWORK_ERROR),
             _ => panic!("expected network error"),
@@ -506,7 +524,7 @@ mod tests {
             .create();
 
         let mut config = refresh_test_config(server.url());
-        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        let err = do_refresh(&mut config, Some(("id", "secret"))).unwrap_err();
         match err {
             CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
             _ => panic!("expected auth error"),
@@ -523,11 +541,48 @@ mod tests {
             .create();
 
         let mut config = refresh_test_config(server.url());
-        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        let err = do_refresh(&mut config, Some(("id", "secret"))).unwrap_err();
         match err {
             CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
             _ => panic!("expected auth error"),
         }
+    }
+
+    #[test]
+    fn first_non_blank_rejects_blank_primary_with_no_fallback() {
+        assert_eq!(first_non_blank(Some(String::new()), || None), None);
+    }
+
+    #[test]
+    fn first_non_blank_rejects_blank_primary_and_blank_fallback() {
+        assert_eq!(
+            first_non_blank(Some(String::new()), || Some(String::new())),
+            None
+        );
+    }
+
+    #[test]
+    fn first_non_blank_falls_back_when_primary_is_blank() {
+        assert_eq!(
+            first_non_blank(Some(String::new()), || Some("env".to_string())),
+            Some("env".to_string())
+        );
+    }
+
+    #[test]
+    fn first_non_blank_falls_back_when_primary_is_missing() {
+        assert_eq!(
+            first_non_blank(None, || Some("env".to_string())),
+            Some("env".to_string())
+        );
+    }
+
+    #[test]
+    fn first_non_blank_prefers_primary_over_fallback() {
+        assert_eq!(
+            first_non_blank(Some("cfg".to_string()), || Some("env".to_string())),
+            Some("cfg".to_string())
+        );
     }
 
     #[test]
@@ -540,10 +595,49 @@ mod tests {
             .create();
 
         let mut config = refresh_test_config(server.url());
-        let err = refresh_token_with_credentials(&mut config, "id", "secret").unwrap_err();
+        let err = do_refresh(&mut config, Some(("id", "secret"))).unwrap_err();
         match err {
             CliError::Auth(msg) => assert_eq!(msg, REFRESH_AUTH_ERROR),
             _ => panic!("expected auth error"),
         }
+    }
+
+    #[test]
+    fn refresh_pat_sends_no_authorization_header() {
+        use mockito::Matcher;
+
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/access_tokens")
+            .match_header("authorization", Matcher::Missing)
+            .match_body(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("grant_type".into(), "refresh_token".into()),
+                Matcher::UrlEncoded("refresh_token".into(), "old_refresh".into()),
+            ]))
+            .with_status(401)
+            .create();
+
+        let mut config = refresh_test_config(server.url());
+        let _ = do_refresh(&mut config, None);
+
+        mock.assert();
+    }
+
+    #[test]
+    fn refresh_oauth_sends_basic_auth() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/access_tokens")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("^Basic ".to_string()),
+            )
+            .with_status(401)
+            .create();
+
+        let mut config = refresh_test_config(server.url());
+        let _ = do_refresh(&mut config, Some(("cid", "csec")));
+
+        mock.assert();
     }
 }

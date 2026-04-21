@@ -1,7 +1,6 @@
 use crate::auth::TokenSet;
 use crate::config::Config;
 use crate::error::CliError;
-use crate::persistence::write_atomic;
 
 pub fn set(key: &str, value: &str) -> Result<(), CliError> {
     let mut config = Config::load()?;
@@ -98,7 +97,7 @@ pub fn set_pat(pat: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Interactive setup for OAuth app credentials. Writes to .env in the current directory.
+/// Interactive setup for OAuth app credentials. Persists them to `config.toml`.
 pub fn setup_oauth() -> Result<(), CliError> {
     use std::io::{self, Write};
 
@@ -128,19 +127,17 @@ pub fn setup_oauth() -> Result<(), CliError> {
 
     let client_secret = rpassword::prompt_password("Client Secret: ")
         .map_err(|e| CliError::Config(format!("failed to read input: {e}")))?;
+    let client_secret = client_secret.trim();
 
-    if client_secret.trim().is_empty() {
+    if client_secret.is_empty() {
         return Err(CliError::Config("client secret cannot be empty".into()));
     }
 
-    let dir = Config::ensure_dir()?;
-    let env_path = dir.join(".env");
-    let content =
-        format!("HUBSTAFF_CLIENT_ID={client_id}\nHUBSTAFF_CLIENT_SECRET={client_secret}\n");
-    write_atomic(&env_path, content.as_bytes())?;
+    let mut config = Config::load()?;
+    config.oauth.client_id = Some(client_id.to_string());
+    config.oauth.client_secret = Some(client_secret.to_string());
+    config.save()?;
 
-    println!();
-    println!("Saved to {}", env_path.display());
     println!();
     println!("You can now run: hubstaff login");
     Ok(())
@@ -160,6 +157,18 @@ pub fn show() -> Result<(), CliError> {
         println!("schema_url = {schema_url}");
     }
     println!("format = {}", config.format);
+    println!();
+    if config.oauth.is_empty() {
+        println!("[oauth] not configured");
+    } else {
+        println!("[oauth]");
+        if config.oauth.client_id.is_some() {
+            println!("client_id = ****");
+        }
+        if config.oauth.client_secret.is_some() {
+            println!("client_secret = ****");
+        }
+    }
     println!();
     if config.auth.access_token.is_some() {
         println!("[auth]");

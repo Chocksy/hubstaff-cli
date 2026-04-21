@@ -4,9 +4,9 @@ use crate::error::CliError;
 use reqwest::blocking::{Client, Response};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const REFRESH_SKEW_SECS: i64 = 120;
+const REFRESH_SKEW_SECS: u64 = 120;
 
 pub struct HubstaffClient {
     config: Config,
@@ -57,25 +57,20 @@ impl HubstaffClient {
         &self.config.api_url
     }
 
-    fn should_refresh_proactively(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+    fn should_refresh_proactively(&self, now_secs: u64) -> bool {
         if self.env_api_token.is_some() || self.config.auth.refresh_token.is_none() {
             return false;
         }
 
-        let Some(expires_at) = self.config.auth.expires_at.as_deref() else {
+        let Some(expires_at) = self.config.auth.expires_at else {
             return false;
         };
 
-        let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
-            return false;
-        };
-        let expires_at = expires_at.with_timezone(&chrono::Utc);
-        let refresh_deadline = now + chrono::Duration::seconds(REFRESH_SKEW_SECS);
-        expires_at <= refresh_deadline
+        expires_at <= now_secs.saturating_add(REFRESH_SKEW_SECS)
     }
 
     fn ensure_fresh_token(&mut self) -> Result<(), CliError> {
-        if self.should_refresh_proactively(chrono::Utc::now()) {
+        if self.should_refresh_proactively(crate::time::now_secs()) {
             auth::refresh_token(&mut self.config)?;
         }
         Ok(())
@@ -90,6 +85,14 @@ impl HubstaffClient {
     ) -> Result<Value, CliError> {
         let parsed_method = parse_method(method)?;
         self.request(parsed_method, path, params, body)
+    }
+
+    pub fn probe_users_me(&mut self) -> Result<u128, CliError> {
+        let url = format!("{}/users/me", self.base_url().trim_end_matches('/'));
+        let (resp, status, elapsed) =
+            self.send_with_auth_retry(Method::Get, &url, &HashMap::new(), None)?;
+        Self::parse_response(resp, status)?;
+        Ok(elapsed.as_millis())
     }
 
     fn build_request(
@@ -122,42 +125,55 @@ impl HubstaffClient {
         params: &HashMap<String, String>,
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
-        self.ensure_fresh_token()?;
-
         let url = format!("{}{path}", self.base_url());
+        let (resp, status, _) = self.send_with_auth_retry(method, &url, params, body)?;
+        Self::parse_response(resp, status)
+    }
+
+    fn send_with_auth_retry(
+        &mut self,
+        method: Method,
+        url: &str,
+        params: &HashMap<String, String>,
+        body: Option<&Value>,
+    ) -> Result<(Response, u16, Duration), CliError> {
+        self.ensure_fresh_token()?;
         let token = self.token()?;
 
+        let started = Instant::now();
         let resp = self
-            .build_request(method, &url, params, body, &token)
+            .build_request(method, url, params, body, &token)
             .send()?;
-
+        let elapsed = started.elapsed();
         let status = resp.status().as_u16();
 
-        // Token refresh on 401
-        if status == 401 {
-            if self.env_api_token.is_some() {
-                return Err(CliError::Auth(
-                    "invalid token. Check your HUBSTAFF_API_TOKEN".to_string(),
-                ));
-            }
-
-            auth::refresh_token(&mut self.config)?;
-            let new_token = self.token()?;
-
-            let retry_resp = self
-                .build_request(method, &url, params, body, &new_token)
-                .send()?;
-
-            let retry_status = retry_resp.status().as_u16();
-            if retry_status == 401 {
-                return Err(CliError::Auth(
-                    "session expired. Run 'hubstaff login'".to_string(),
-                ));
-            }
-            return Self::parse_response(retry_resp, retry_status);
+        if status != 401 {
+            return Ok((resp, status, elapsed));
         }
 
-        Self::parse_response(resp, status)
+        if self.env_api_token.is_some() {
+            return Err(CliError::Auth(
+                "invalid token. Check your HUBSTAFF_API_TOKEN".to_string(),
+            ));
+        }
+
+        auth::refresh_token(&mut self.config)?;
+        let new_token = self.token()?;
+
+        let retry_started = Instant::now();
+        let retry_resp = self
+            .build_request(method, url, params, body, &new_token)
+            .send()?;
+        let retry_elapsed = retry_started.elapsed();
+        let retry_status = retry_resp.status().as_u16();
+
+        if retry_status == 401 {
+            return Err(CliError::Auth(
+                "session expired. Run 'hubstaff login'".to_string(),
+            ));
+        }
+
+        Ok((retry_resp, retry_status, retry_elapsed))
     }
 
     fn parse_response(resp: Response, status: u16) -> Result<Value, CliError> {
@@ -771,42 +787,44 @@ mod tests {
 
     #[test]
     fn proactive_refresh_false_with_env_token() {
+        let now = crate::time::now_secs();
         let config = Config {
             auth: crate::config::AuthConfig {
                 access_token: Some("test_token".to_string()),
                 refresh_token: Some("refresh_token".to_string()),
-                expires_at: Some(chrono::Utc::now().to_rfc3339()),
+                expires_at: Some(now),
             },
             ..Default::default()
         };
         let client = new_with_env_token(config, Some("env_api_token".to_string())).unwrap();
 
-        assert!(!client.should_refresh_proactively(chrono::Utc::now()));
+        assert!(!client.should_refresh_proactively(now));
     }
 
     #[test]
     fn proactive_refresh_false_when_expiry_far_in_future() {
+        let now = crate::time::now_secs();
         let config = Config {
             auth: crate::config::AuthConfig {
                 access_token: Some("test_token".to_string()),
                 refresh_token: Some("refresh_token".to_string()),
-                expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc3339()),
+                expires_at: Some(now + 20 * 60),
             },
             ..Default::default()
         };
         let client = test_client(config);
 
-        assert!(!client.should_refresh_proactively(chrono::Utc::now()));
+        assert!(!client.should_refresh_proactively(now));
     }
 
     #[test]
     fn proactive_refresh_true_when_expiry_within_skew() {
-        let now = chrono::Utc::now();
+        let now = crate::time::now_secs();
         let config = Config {
             auth: crate::config::AuthConfig {
                 access_token: Some("test_token".to_string()),
                 refresh_token: Some("refresh_token".to_string()),
-                expires_at: Some((now + chrono::Duration::seconds(30)).to_rfc3339()),
+                expires_at: Some(now + 30),
             },
             ..Default::default()
         };
@@ -816,31 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn request_continues_when_expires_at_is_invalid() {
-        let mut server = mockito::Server::new();
-        let mock = server
-            .mock("GET", "/users/me")
-            .match_header("authorization", "Bearer test_token")
-            .with_status(200)
-            .with_body(r#"{"user":{"id":1}}"#)
-            .create();
-
-        let mut config = test_config(&server.url());
-        config.auth.refresh_token = Some("refresh_token".to_string());
-        config.auth.expires_at = Some("not-a-timestamp".to_string());
-        let mut client = test_client(config);
-        let result = get_json(&mut client, "/users/me", &HashMap::new()).unwrap();
-
-        assert_eq!(result["user"]["id"], 1);
-        mock.assert();
-    }
-
-    #[test]
     fn request_fails_when_proactive_refresh_fails() {
         let mut config = test_config("http://127.0.0.1:9");
         config.auth.refresh_token = Some("refresh_token".to_string());
-        config.auth.expires_at =
-            Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339());
+        config.auth.expires_at = Some(crate::time::now_secs() + 30);
         // Force refresh attempt to fail regardless of env by using an unreachable auth endpoint.
         config.auth_url = "http://127.0.0.1:9".to_string();
 
@@ -851,7 +848,7 @@ mod tests {
                 assert!(message.contains("Couldn't refresh your session right now"));
             }
             CliError::Config(message) => {
-                assert!(message.contains("HUBSTAFF_CLIENT_ID not set"));
+                assert!(message.contains("OAuth client ID not set"));
             }
             _ => panic!("expected proactive refresh error"),
         }

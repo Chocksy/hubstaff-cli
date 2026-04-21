@@ -74,9 +74,8 @@ mod helpers {
   }
 }"#;
 
-        let meta = format!(
-            "fetched_at = \"2099-01-01T00:00:00Z\"\netag = \"test\"\nsource_url = \"{source_url}\"\n"
-        );
+        let meta =
+            format!("fetched_at = 4070908800\netag = \"test\"\nsource_url = \"{source_url}\"\n");
 
         fs::write(schema_dir.join("docs.json"), docs).expect("failed to write docs cache");
         fs::write(schema_dir.join("meta.toml"), meta).expect("failed to write meta cache");
@@ -100,6 +99,42 @@ fn cli_help_lists_hardcoded_commands() {
         assert!(stdout.contains(cmd), "missing command: {cmd}");
     }
     assert!(!stdout.contains("api"));
+}
+
+#[test]
+fn cli_doctor_subcommand_is_not_supported() {
+    let xdg = helpers::temp_xdg();
+    let dir = xdg.path().to_str().unwrap();
+
+    let (_, stderr, code) = helpers::run(&["doctor"], dir);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("doctor"),
+        "expected error to mention doctor subcommand, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_diagnose_subcommand_is_not_supported() {
+    let xdg = helpers::temp_xdg();
+    let dir = xdg.path().to_str().unwrap();
+
+    let (_, stderr, code) = helpers::run(&["diagnose"], dir);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("diagnose"),
+        "expected error to mention diagnose subcommand, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_check_rejects_json_flag() {
+    let xdg = helpers::temp_xdg();
+    let dir = xdg.path().to_str().unwrap();
+
+    let (_, stderr, code) = helpers::run(&["check", "--json"], dir);
+    assert_eq!(code, 3);
+    assert!(stderr.contains("--json is not supported for 'hubstaff check'"));
 }
 
 #[test]
@@ -217,7 +252,7 @@ fn cli_config_set_token_clears_oauth_refresh_state() {
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(
         cfg_dir.join("config.toml"),
-        "[auth]\naccess_token = \"old_access\"\nrefresh_token = \"old_refresh\"\nexpires_at = \"2099-01-01T00:00:00Z\"\n",
+        "[auth]\naccess_token = \"old_access\"\nrefresh_token = \"old_refresh\"\nexpires_at = 4070908800\n",
     )
     .unwrap();
 
@@ -350,6 +385,95 @@ fn cli_logout_clears_tokens() {
 }
 
 #[test]
+fn cli_check_skips_config_dependent_checks_when_config_is_invalid() {
+    fn find_check_line<'a>(stdout: &'a str, name: &str) -> &'a str {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("missing check line: {name}\nstdout:\n{stdout}"))
+    }
+
+    let xdg = helpers::temp_xdg();
+    let dir = xdg.path().to_str().unwrap();
+
+    let cfg_dir = xdg.path().join("hubstaff");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join("config.toml"), "bad = [").unwrap();
+
+    let (stdout, stderr, code) = helpers::run(&["check"], dir);
+    assert_eq!(code, 1, "stderr={stderr}");
+
+    let config_file = find_check_line(&stdout, "Config file");
+    assert!(config_file.contains("FAIL"));
+    assert!(
+        config_file.contains("config parse error"),
+        "config file check should surface parse error, got: {config_file}"
+    );
+
+    for name in [
+        "Credentials",
+        "Env token shadowing",
+        "Token validity",
+        "API reachability",
+        "Organization access",
+    ] {
+        let check_line = find_check_line(&stdout, name);
+        assert!(
+            check_line.contains("SKIP"),
+            "expected {name} to be skipped, got: {check_line}"
+        );
+        assert!(
+            check_line.contains("config failed to load: config parse error"),
+            "expected config failure detail for {name}, got: {check_line}"
+        );
+    }
+}
+
+#[test]
+fn cli_check_treats_refresh_only_session_as_credentials() {
+    fn find_check_line<'a>(stdout: &'a str, name: &str) -> &'a str {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("missing check line: {name}\nstdout:\n{stdout}"))
+    }
+
+    let xdg = helpers::temp_xdg();
+    let dir = xdg.path().to_str().unwrap();
+
+    let cfg_dir = xdg.path().join("hubstaff");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "api_url = \"http://127.0.0.1:9\"\nauth_url = \"http://127.0.0.1:9\"\n[auth]\nrefresh_token = \"refresh_only\"\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = helpers::run(&["check"], dir);
+    assert_eq!(code, 1, "stderr={stderr}");
+
+    let credentials = find_check_line(&stdout, "Credentials");
+    assert!(credentials.contains("OK"));
+    assert!(credentials.contains("PAT session"));
+
+    let token_validity = find_check_line(&stdout, "Token validity");
+    assert!(
+        !token_validity.contains("SKIP"),
+        "refresh-only sessions should run token validity checks"
+    );
+    assert!(
+        !token_validity.contains("no credentials"),
+        "refresh-only sessions should not be treated as missing credentials"
+    );
+
+    let api_reachability = find_check_line(&stdout, "API reachability");
+    assert!(
+        !api_reachability.contains("SKIP"),
+        "refresh-only sessions should run API reachability checks"
+    );
+}
+
+#[test]
 fn dynamic_projects_list_uses_schema_mapping() {
     let xdg = helpers::temp_xdg();
     let dir = xdg.path().to_str().unwrap();
@@ -473,9 +597,8 @@ fn dynamic_command_uses_cache_when_source_url_matches_effective_schema_url() {
 
     let schema_source = "http://127.0.0.1:1/docs";
     let schema_dir = xdg.path().join("hubstaff").join("schema").join("v2");
-    let meta = format!(
-        "fetched_at = \"2099-01-01T00:00:00Z\"\netag = \"test\"\nsource_url = \"{schema_source}\"\n"
-    );
+    let meta =
+        format!("fetched_at = 4070908800\netag = \"test\"\nsource_url = \"{schema_source}\"\n");
     std::fs::write(schema_dir.join("meta.toml"), meta).expect("failed to rewrite meta");
 
     let mut server = mockito::Server::new();

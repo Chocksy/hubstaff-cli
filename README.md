@@ -53,7 +53,7 @@ hubstaff login
 
 Opens your browser to authenticate with Hubstaff. Tokens are saved and auto-refresh.
 
-Alternatively, set the credentials via environment variables or a `.env` file:
+Alternatively, set the credentials via environment variables:
 
 ```bash
 export HUBSTAFF_CLIENT_ID="your_client_id"

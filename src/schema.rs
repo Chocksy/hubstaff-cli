@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::CliError;
 use crate::persistence::write_atomic;
-use chrono::Utc;
+use crate::time::now_secs;
 use reqwest::blocking::Client;
 use reqwest::header::{ETAG, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ pub struct SchemaCacheMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fetched_at: Option<String>,
+    pub fetched_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +140,7 @@ impl ApiSchema {
                     CliError::Config("schema returned 304 but local cache is missing".to_string())
                 })?;
                 let mut meta = existing_meta.unwrap_or_default();
-                meta.fetched_at = Some(Utc::now().to_rfc3339());
+                meta.fetched_at = Some(now_secs());
                 if meta.schema_hash.is_none() {
                     meta.schema_hash = Some(hash_schema_json(&cached)?);
                 }
@@ -599,7 +599,7 @@ fn write_cache(schema: &Value, etag: Option<String>, source_url: &str) -> Result
 
     let meta = SchemaCacheMeta {
         etag,
-        fetched_at: Some(Utc::now().to_rfc3339()),
+        fetched_at: Some(now_secs()),
         schema_hash: Some(hash_schema_json(schema)?),
         source_url: Some(source_url.to_string()),
     };
