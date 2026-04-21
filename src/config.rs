@@ -21,6 +21,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_url: Option<String>,
     pub format: String,
+    #[serde(skip_serializing_if = "OAuthConfig::is_empty")]
+    pub oauth: OAuthConfig,
     #[serde(skip_serializing_if = "AuthConfig::is_empty")]
     pub auth: AuthConfig,
 }
@@ -33,8 +35,23 @@ impl Default for Config {
             organization: None,
             schema_url: None,
             format: DEFAULT_FORMAT.to_string(),
+            oauth: OAuthConfig::default(),
             auth: AuthConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct OAuthConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+}
+
+impl OAuthConfig {
+    pub fn is_empty(&self) -> bool {
+        self.client_id.is_none() && self.client_secret.is_none()
     }
 }
 
@@ -45,7 +62,7 @@ pub struct AuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    pub expires_at: Option<u64>,
 }
 
 impl AuthConfig {
@@ -127,6 +144,26 @@ impl Config {
         self.auth.expires_at = tokens.expires_at;
     }
 
+    pub fn oauth_client_id_present(&self) -> bool {
+        self.oauth
+            .client_id
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+            || std::env::var("HUBSTAFF_CLIENT_ID").is_ok_and(|v| !v.is_empty())
+    }
+
+    pub fn oauth_client_secret_present(&self) -> bool {
+        self.oauth
+            .client_secret
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+            || std::env::var("HUBSTAFF_CLIENT_SECRET").is_ok_and(|v| !v.is_empty())
+    }
+
+    pub fn has_oauth_app(&self) -> bool {
+        self.oauth_client_id_present() && self.oauth_client_secret_present()
+    }
+
     pub fn get_token(&self) -> Option<String> {
         // Environment token precedence is handled by HubstaffClient.
         self.auth.access_token.clone()
@@ -154,6 +191,8 @@ impl Config {
             "api_url" => self.api_url = DEFAULT_API_URL.to_string(),
             "auth_url" => self.auth_url = DEFAULT_AUTH_URL.to_string(),
             "format" => self.format = DEFAULT_FORMAT.to_string(),
+            "client_id" => self.oauth.client_id = None,
+            "client_secret" => self.oauth.client_secret = None,
             "token" | "refresh_token" => {
                 return Err(CliError::Config(
                     "cannot unset auth tokens here; run 'hubstaff logout'".to_string(),
@@ -161,7 +200,7 @@ impl Config {
             }
             _ => {
                 return Err(CliError::Config(format!(
-                    "unknown config key: {key}. Valid keys: organization, api_url, auth_url, schema_url, format"
+                    "unknown config key: {key}. Valid keys: organization, api_url, auth_url, schema_url, format, client_id, client_secret"
                 )));
             }
         }
@@ -197,7 +236,127 @@ mod tests {
         );
         assert_eq!(config.format, "compact");
         assert!(config.organization.is_none());
+        assert!(config.oauth.is_empty());
         assert!(config.auth.is_empty());
+    }
+
+    #[test]
+    fn oauth_config_is_empty_when_all_none() {
+        let oauth = OAuthConfig::default();
+        assert!(oauth.is_empty());
+    }
+
+    #[test]
+    fn oauth_config_not_empty_with_client_id() {
+        let oauth = OAuthConfig {
+            client_id: Some("id".to_string()),
+            ..Default::default()
+        };
+        assert!(!oauth.is_empty());
+    }
+
+    #[test]
+    fn config_serialization_skips_empty_oauth() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(!toml_str.contains("[oauth]"));
+    }
+
+    #[test]
+    fn config_serialization_includes_oauth_when_present() {
+        let config = Config {
+            oauth: OAuthConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("csec".to_string()),
+            },
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(toml_str.contains("[oauth]"));
+        assert!(toml_str.contains("client_id = \"cid\""));
+        assert!(toml_str.contains("client_secret = \"csec\""));
+    }
+
+    #[test]
+    fn config_unset_clears_client_id() {
+        let mut config = Config {
+            oauth: OAuthConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("csec".to_string()),
+            },
+            ..Default::default()
+        };
+        config.unset("client_id").unwrap();
+        assert!(config.oauth.client_id.is_none());
+        assert_eq!(config.oauth.client_secret.as_deref(), Some("csec"));
+    }
+
+    #[test]
+    fn config_unset_clears_client_secret() {
+        let mut config = Config {
+            oauth: OAuthConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("csec".to_string()),
+            },
+            ..Default::default()
+        };
+        config.unset("client_secret").unwrap();
+        assert_eq!(config.oauth.client_id.as_deref(), Some("cid"));
+        assert!(config.oauth.client_secret.is_none());
+    }
+
+    #[test]
+    fn has_oauth_app_false_when_both_missing() {
+        let config = Config::default();
+        assert!(!config.has_oauth_app());
+    }
+
+    #[test]
+    fn has_oauth_app_false_when_only_client_id_in_config() {
+        let config = Config {
+            oauth: OAuthConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: None,
+            },
+            ..Default::default()
+        };
+        assert!(!config.has_oauth_app());
+    }
+
+    #[test]
+    fn has_oauth_app_false_when_only_client_secret_in_config() {
+        let config = Config {
+            oauth: OAuthConfig {
+                client_id: None,
+                client_secret: Some("csec".to_string()),
+            },
+            ..Default::default()
+        };
+        assert!(!config.has_oauth_app());
+    }
+
+    #[test]
+    fn has_oauth_app_true_when_both_in_config() {
+        let config = Config {
+            oauth: OAuthConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("csec".to_string()),
+            },
+            ..Default::default()
+        };
+        assert!(config.has_oauth_app());
+    }
+
+    #[test]
+    fn has_oauth_app_false_when_config_values_are_empty_strings() {
+        let config = Config {
+            oauth: OAuthConfig {
+                client_id: Some(String::new()),
+                client_secret: Some(String::new()),
+            },
+            ..Default::default()
+        };
+        assert!(!config.has_oauth_app());
     }
 
     #[test]
@@ -230,21 +389,18 @@ mod tests {
             auth: AuthConfig {
                 access_token: Some("old_access".into()),
                 refresh_token: Some("old_refresh".into()),
-                expires_at: Some("2025-01-01T00:00:00Z".into()),
+                expires_at: Some(1_735_689_600),
             },
             ..Default::default()
         };
         config.store_tokens(TokenSet {
             access_token: "new_access".into(),
             refresh_token: "new_refresh".into(),
-            expires_at: Some("2030-01-01T00:00:00Z".into()),
+            expires_at: Some(1_893_456_000),
         });
         assert_eq!(config.auth.access_token.as_deref(), Some("new_access"));
         assert_eq!(config.auth.refresh_token.as_deref(), Some("new_refresh"));
-        assert_eq!(
-            config.auth.expires_at.as_deref(),
-            Some("2030-01-01T00:00:00Z")
-        );
+        assert_eq!(config.auth.expires_at, Some(1_893_456_000));
     }
 
     #[test]
@@ -253,7 +409,7 @@ mod tests {
             auth: AuthConfig {
                 access_token: Some("old_access".into()),
                 refresh_token: Some("old_refresh".into()),
-                expires_at: Some("2025-01-01T00:00:00Z".into()),
+                expires_at: Some(1_735_689_600),
             },
             ..Default::default()
         };
@@ -333,7 +489,7 @@ format = "json"
 [auth]
 access_token = "tok123"
 refresh_token = "ref456"
-expires_at = "2026-04-01T00:00:00Z"
+expires_at = 1775347200
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.api_url, "https://custom.api.com/v2");
@@ -342,6 +498,7 @@ expires_at = "2026-04-01T00:00:00Z"
         assert_eq!(config.format, "json");
         assert_eq!(config.auth.access_token.as_deref(), Some("tok123"));
         assert_eq!(config.auth.refresh_token.as_deref(), Some("ref456"));
+        assert_eq!(config.auth.expires_at, Some(1_775_347_200));
     }
 
     #[test]

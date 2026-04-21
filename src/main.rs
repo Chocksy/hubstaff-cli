@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod check;
 mod client;
 mod command_index;
 mod commands_list;
@@ -8,6 +9,7 @@ mod config_commands;
 mod error;
 mod persistence;
 mod schema;
+mod time;
 
 use clap::{Parser, Subcommand};
 use client::HubstaffClient;
@@ -54,6 +56,8 @@ enum Commands {
         #[command(subcommand)]
         action: CommandsAction,
     },
+    /// Run diagnostic checks on config, credentials, and API connectivity
+    Check,
     #[command(external_subcommand)]
     Dynamic(Vec<String>),
 }
@@ -96,12 +100,6 @@ enum CommandsAction {
 }
 
 fn main() {
-    // Load .env from config dir first (setup-oauth writes here),
-    // then local .env (overrides if present)
-    let config_env = config::Config::config_dir().join(".env");
-    let _ = dotenvy::from_path(&config_env);
-    let _ = dotenvy::dotenv();
-
     let cli = Cli::parse();
 
     let result = run(&cli);
@@ -140,6 +138,15 @@ fn run(cli: &Cli) -> Result<(), error::CliError> {
         Commands::Browse { action } => match action {
             CommandsAction::List => commands_list::list(),
         },
+        Commands::Check => {
+            if cli.json {
+                return Err(error::CliError::Config(
+                    "--json is not supported for 'hubstaff check'".to_string(),
+                ));
+            }
+            check::run();
+            Ok(())
+        }
         Commands::Dynamic(args) => {
             let cfg = config::Config::load()?;
             let schema = schema::ApiSchema::load(&cfg)?;
