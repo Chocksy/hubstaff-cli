@@ -5,6 +5,8 @@ edition = "2024"
 description = "Token-efficient CLI for the Hubstaff Public API v2"
 license = "MIT"
 repository = "https://github.com/NetsoftHoldings/hubstaff-cli"
+homepage = "https://github.com/NetsoftHoldings/hubstaff-cli"
+readme = "README.md"
 
 [[bin]]
 name = "hubstaff"
@@ -31,6 +33,9 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+[profile.dist]
+inherits = "release"
 
 [lints.rust]
 unsafe_code = "deny"
