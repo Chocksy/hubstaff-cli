@@ -25,6 +25,10 @@ deny:
 audit:
     cargo audit
 
+trufflehog:
+    docker run --rm -v "$(pwd):/repo" trufflesecurity/trufflehog:latest \
+        git file:///repo --results=verified,unknown --fail
+
 check: lint test
 
 ci: lint deny test audit
